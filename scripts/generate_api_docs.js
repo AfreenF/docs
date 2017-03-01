@@ -6,15 +6,26 @@
  * cd scripts && node generate_api_docs.js
  */
 
-var hyd = require('hydrolysis');
-var fs = require('fs');
-var exec = require('child_process').exec;
-var escape = require('html-escape');
+const {Analyzer} = require('polymer-analyzer');
+const {FSUrlLoader} = require('polymer-analyzer/lib/url-loader/fs-url-loader');
+const {PackageUrlResolver} = require('polymer-analyzer/lib/url-loader/package-url-resolver');
+const {generateElementMetadata} = require('polymer-analyzer/lib/generate-elements');
 
-var apiDocsPath = '../app/1.0/docs/api/';
+const clone = require('clone');
+const fs = require('fs');
+const {exec} = require('child_process');
+const escape = require('html-escape');
+const path = require('path');
+
+const apiDocsPath = '../app/2.0/docs/api/';
+const rootNamespace = 'Polymer';
 
 // TODO: Check out an actual release SHA to generate docs off of.g
-var releaseSha = 'v1.5.0-dev'; //'27d90bfaeb13f1d1a822f8a5e6e26a5403f5ed2c';
+const releaseSha = 'da3fd0fbde869738ea167a8d6d095a716ea029a5';
+
+process.on('unhandledRejection', (reason, p) => {
+  console.log('Unhandled Rejection at: Promise ', p, ' reason: ', reason);
+});
 
 /**
  * Everything is chained, so running this will do the following:
@@ -26,9 +37,12 @@ var releaseSha = 'v1.5.0-dev'; //'27d90bfaeb13f1d1a822f8a5e6e26a5403f5ed2c';
  */
 
 cleanUp(installPolymer);
+// installPolymer();
+// checkoutRef();
+// generateDocs();
 
 function cleanUp(callback) {
-  var command = 'rm -rf ./temp';
+  const command = 'rm -rf ./temp';
   console.log(`Running ${command}...`);
 
   exec(command, callback);
@@ -36,67 +50,215 @@ function cleanUp(callback) {
 
 function installPolymer() {
   console.log('Done.');
-  var command = 'git clone https://github.com/Polymer/polymer.git temp';
+  const command = 'git clone https://github.com/Polymer/polymer.git temp';
   console.log(`Running ${command}...`);
 
+  exec(command, checkoutRef);
+}
+
+function checkoutRef() {
+  console.log('Done.');
+  const command = `cd temp && git checkout ${releaseSha} && cd ..`;
+  console.log(`Running ${command}...`);
   exec(command, generateDocs);
 }
 
 function generateDocs() {
   console.log('Done.');
-  var command = `rm ${apiDocsPath}*.html`;
+  const command = `rm -r ${apiDocsPath}*`;
   console.log(`Running ${command}...`);
-  exec(command, runHydrolysis);
+  exec(command, runAnalyzer);
 }
 
-function runHydrolysis() {
+function runAnalyzer() {
   console.log('Done.');
 
-  hyd.Analyzer.analyze('temp/polymer.html')
-    .then(function(analyzer) {
+  const isInTests = /(\b|\/|\\)(test)(\/|\\)/;
+  const isNotTest = (f) => !isInTests.test(f.sourceRange.file);
+
+  const analyzer = new Analyzer({
+    urlLoader: new FSUrlLoader(path.resolve('temp')),
+    urlResolver: new PackageUrlResolver(),
+  });
+
+  analyzer.analyzePackage()
+    .then((_package) => {
       console.log('Analyzer done');
+      const metadata = generateElementMetadata(_package, '', isNotTest);
+      const json = JSON.stringify(metadata, null, 2);
+      fs.writeFileSync('elements.json', json);
 
-      // Polymer has both elements and behaviours, so get both.
-      var sections = analyzer.elements;
-      sections = sections.concat(analyzer.behaviors);
+      const namespaceSummaries = new Map();
 
-      for (var i = 0; i < sections.length; i++) {
-        var sectionName = sections[i]['is'];
-        var filename = apiDocsPath + sectionName + '.html';
-        console.log(`Generating ${filename}...`);
-
-        var section = cleanUpSectionDocs(sections[i]);
-        var json = escape(JSON.stringify(section));
-
-        var fileContents =
-`{% set markdown = "true" %}
-{% set title = "${sectionName}" %}
-{% extends "templates/base-devguide.html" %}
-{% block title %} API Reference - ${sectionName}{% endblock %}
-{% block content %}
-<iron-doc-viewer>${json}</iron-doc-viewer>
-{% endblock %}`;
-
-        fs.writeFileSync(filename, fileContents);
-        console.log('Done.');
+      // Build mapping of namespaces
+      if (metadata.namespaces) {
+        // Create summaries objects
+        for (const namespace of metadata.namespaces) {
+          namespaceSummaries.set(namespace.name, {
+            namespaces: [],
+            elements: [],
+            mixins: [],
+          });
+        }
+        // Add nested namespaces to parents
+        for (const namespace of metadata.namespaces) {
+          if (namespace.name === rootNamespace) {
+            continue;
+          }
+          const parentName = getNamespaceName(namespace.name);
+          const parent = namespaceSummaries.get(parentName);
+          if (parent) {
+            parent.namespaces.push({
+              name: namespace.name,
+              summary: namespace.summary,
+            });
+          }
+        }
       }
 
-      cleanUp(function() {
-        console.log('Done.');
-        console.log('\nAPI docs completed with great success');
-      });
-    }, function(e) {
-      console.log('Could not run hydrolysis', e);
+      console.log(`Processing ${metadata.elements && metadata.elements.length} elements`);
+      if (metadata.elements) {
+        fs.mkdirSync(path.join(apiDocsPath, 'elements'));
+        for (const element of metadata.elements) {
+          // Add a summary to the namespace
+          const namespaceName = getNamespaceName(element.classname);
+          console.log(`adding ${getElementName(element)} to ${namespaceName}`);
+          if (namespaceName) {
+            const summaries = namespaceSummaries.get(namespaceName);
+            if (summaries) {
+              const summary = {
+                classname: element.classname,
+                tagname: element.tagname,
+                summary: element.summary,
+              };
+              summaries.elements.push(summary);
+            }
+          }
+
+          const fileContents = elementPage(element);
+          const filename = path.join(apiDocsPath, getElementUrl(element) + '.html');
+          console.log('Writing', filename);
+          fs.writeFileSync(filename, fileContents);
+        }
+      }
+
+      console.log(`Processing ${metadata.mixins && metadata.mixins.length} mixins`);
+      if (metadata.mixins) {
+        fs.mkdirSync(path.join(apiDocsPath, 'mixins'));
+        for (const mixin of metadata.mixins) {
+          // Add a summary to the namespace
+          const namespaceName = getNamespaceName(mixin.name);
+          if (namespaceName) {
+            const summaries = namespaceSummaries.get(namespaceName);
+            if (summaries) {
+              const summary = {
+                name: mixin.name,
+                summary: mixin.summary,
+              };
+              summaries.elements.push(summary);
+            }
+          }
+
+          const fileContents = mixinPage(mixin);
+          const filename = path.join(apiDocsPath, getMixinUrl(mixin) + '.html');
+          console.log('Writing', filename);
+          fs.writeFileSync(filename, fileContents);
+        }
+      }
+
+      console.log(`Processing ${metadata.namespaces && metadata.namespaces.length} namespaces`);
+      if (metadata.namespaces) {
+        fs.mkdirSync(path.join(apiDocsPath, 'namespaces'));
+        for (const namespace of metadata.namespaces) {
+          // Clone the namespace so we can replace members with summaries
+          const namespaceClone = clone(namespace);
+          const summaries = namespaceSummaries.get(namespace.name);
+          namespaceClone.elements = Array.from(summaries.elements);
+          namespaceClone.mixins = Array.from(summaries.mixins);
+          namespaceClone.namespaces = Array.from(summaries.namespaces);
+
+          const fileContents = namespacePage(namespaceClone);
+          const filename = (namespace.name === rootNamespace)
+            ? 'index.html'
+            : `namespaces/${namespace.name}.html`;
+          console.log('Writing', filename);
+          fs.writeFileSync(path.join(apiDocsPath, filename), fileContents);
+        }
+      }
+
+//       cleanUp(function() {
+//         console.log('Done.');
+//         console.log('\nAPI docs completed with great success');
+      // });
+    }, (e) => {
+      console.error('Error running analyzePackage()', e);
     });
 }
 
-function cleanUpSectionDocs(section) {
-  section.scriptElement = undefined;
-  section.behaviors && section.behaviors.forEach(function(behavior) {
-    behavior.javascriptNode = undefined;
-  });
-  section.properties && section.properties.forEach(function(property) {
-    property.javascriptNode = undefined;
-  });
-  return section;
+function elementPage(element) {
+  const name = getElementName(element);
+  const jsonString = escape(JSON.stringify(element));
+  return `{% set markdown = "true" %}
+{% set title = "${name}" %}
+{% extends "templates/base-devguide.html" %}
+{% block title %} API Reference - ${name}{% endblock %}
+{% block content %}
+<iron-doc-element descriptor="${jsonString}"></iron-doc-element>
+{% endblock %}`;
+}
+
+function mixinPage(mixin) {
+  const name = mixin.name;
+  const jsonString = escape(JSON.stringify(mixin));
+  return `{% set markdown = "true" %}
+{% set title = "${name}" %}
+{% extends "templates/base-devguide.html" %}
+{% block title %} API Reference - ${name}{% endblock %}
+{% block content %}
+<iron-doc-mixin descriptor="${jsonString}"></iron-doc-mixin>
+{% endblock %}`;
+}
+
+function namespacePage(namespace) {
+  const name = namespace.name;
+  const jsonString = escape(JSON.stringify(namespace));
+  return `{% set markdown = "true" %}
+{% set title = "${name}" %}
+{% extends "templates/base-devguide.html" %}
+{% block title %} API Reference - ${name}{% endblock %}
+{% block content %}
+<iron-doc-namespace descriptor="${jsonString}"></iron-doc-namespace>
+{% endblock %}`;
+}
+
+function getNamespaceName(name) {
+  if (typeof name === 'string') {
+    const parts = name.split('.');
+    console.log(name, ':', parts);
+    if (parts.length > 1) {
+      return parts.slice(0, parts.length - 1).join('.');
+    }
+  }
+  return rootNamespace;
+}
+
+function getElementName(element) {
+  let name = '';
+  if (element.tagname) {
+    name += `<${element.tagname}>`;
+    if (element.classname) {
+      name += ` (${element.classname})`;
+    }
+  } else if (element.classname) {
+    name += element.classname;
+  }
+  return name;
+}
+
+function getElementUrl(element) {
+  return element.tagname ? `/elements/${element.tagname}` : `/elements/${element.classname}`;
+}
+
+function getMixinUrl(mixin) {
+  return `/mixins/${mixin.name}`;
 }
