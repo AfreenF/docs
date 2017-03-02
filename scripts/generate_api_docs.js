@@ -36,10 +36,10 @@ process.on('unhandledRejection', (reason, p) => {
  * - generate the files in ../app/1.0/devguide/api/
  */
 
-cleanUp(installPolymer);
+// cleanUp(installPolymer);
 // installPolymer();
 // checkoutRef();
-// generateDocs();
+generateDocs();
 
 function cleanUp(callback) {
   const command = 'rm -rf ./temp';
@@ -131,6 +131,7 @@ function runAnalyzer() {
                 tagname: element.tagname,
                 summary: element.summary,
               };
+              console.log('adding element summary to ', namespaceName, summary);
               summaries.elements.push(summary);
             }
           }
@@ -155,7 +156,7 @@ function runAnalyzer() {
                 name: mixin.name,
                 summary: mixin.summary,
               };
-              summaries.elements.push(summary);
+              summaries.mixins.push(summary);
             }
           }
 
@@ -174,6 +175,8 @@ function runAnalyzer() {
           const namespaceClone = clone(namespace);
           const summaries = namespaceSummaries.get(namespace.name);
           namespaceClone.elements = Array.from(summaries.elements);
+          // console.log('namespace elements', namespace.name, summaries.elements);
+          console.log('namespace sub-namespaces', namespace.name, summaries.namespaces);
           namespaceClone.mixins = Array.from(summaries.mixins);
           namespaceClone.namespaces = Array.from(summaries.namespaces);
 
@@ -203,7 +206,7 @@ function elementPage(element) {
 {% extends "templates/base-devguide.html" %}
 {% block title %} API Reference - ${name}{% endblock %}
 {% block content %}
-<iron-doc-element descriptor="${jsonString}"></iron-doc-element>
+<iron-doc-element base-href="/2.0/docs/api" descriptor="${jsonString}"></iron-doc-element>
 {% endblock %}`;
 }
 
@@ -215,7 +218,7 @@ function mixinPage(mixin) {
 {% extends "templates/base-devguide.html" %}
 {% block title %} API Reference - ${name}{% endblock %}
 {% block content %}
-<iron-doc-mixin descriptor="${jsonString}"></iron-doc-mixin>
+<iron-doc-mixin base-href="/2.0/docs/api" descriptor="${jsonString}"></iron-doc-mixin>
 {% endblock %}`;
 }
 
@@ -227,7 +230,7 @@ function namespacePage(namespace) {
 {% extends "templates/base-devguide.html" %}
 {% block title %} API Reference - ${name}{% endblock %}
 {% block content %}
-<iron-doc-namespace descriptor="${jsonString}"></iron-doc-namespace>
+<iron-doc-namespace base-href="/2.0/docs/api" descriptor="${jsonString}"></iron-doc-namespace>
 {% endblock %}`;
 }
 
